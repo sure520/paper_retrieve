@@ -130,3 +130,77 @@ logs
 log
 outputs
 .history
+
+##################
+# paper_searsh
+# 操作系统自动生成的文件
+.DS_Store
+Thumbs.db
+
+# IDE/编辑器配置目录
+.vscode/
+.idea/
+.trae/
+*.swp
+*.swo
+*~
+
+# 依赖安装目录
+node_modules/
+vendor/
+
+# 编译输出目录
+dist/
+build/
+out/
+target/
+
+# 日志文件
+*.log
+logs/
+
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# 训练数据文件
+data/
+
+# 模型文件
+models/
+
+# 临时文件
+*.tmp
+*.temp
+*.cache
+
+# 测试覆盖率
+coverage/
+.nyc_output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# macOS
+*.dmg
+*.app
+
+# Windows
+*.exe
+*.dll
+*.bat
+
+# 其他常见需忽略的文件
+*.bak
+*.backup
+*.old

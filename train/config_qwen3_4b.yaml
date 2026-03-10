@@ -1,0 +1,85 @@
+# Qwen3-4B GRPO/GSPO 训练配置文件 - 4卡4090优化版
+
+# 模型配置
+model:
+  ref_model_path: "Qwen/Qwen3-4B-Instruct"
+  pretrained_model_path: "Qwen/Qwen3-4B-Instruct"
+  dtype: "bfloat16"
+  trust_remote_code: true
+  # Qwen3特性: 支持思考模式，可通过enable_thinking控制
+
+# 数据配置
+data:
+  data_path: "train/data/paper_train.json"
+  max_gen_len: 2048          # Qwen3支持长上下文，可处理完整论文
+  test_size: 400             # 10%验证集
+  sample_batch_size: 16      # 采样批次大小（每卡）
+  train_batch_size: 8        # 训练批次大小（每卡）
+  test_batch_size: 32        # 评估批次大小
+  num_answers_per_question: 4 # GRPO组内采样数
+  max_prompt_length: 8192    # 论文输入最大长度
+
+# 训练配置
+training:
+  use_gspo: true             # 使用GSPO算法（比GRPO更稳定）
+  learning_rate: 5e-6        # 较小学习率确保稳定
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_steps: 100          # 预热步数
+  sync_interval: 10          # 模型同步间隔
+  eval_interval: 50          # 评估间隔
+  save_interval: 100         # 保存checkpoint间隔
+  max_train_steps: 2000      # 总训练步数
+  max_sample_batches: 2000   # 最大采样批次数
+  gradient_accumulation_steps: 2  # 梯度累积
+
+# ZeroMQ通信配置
+communication:
+  data_port: 5555
+  timeout: 100
+
+# DeepSpeed配置
+deepspeed:
+  config_path: "./ds_config_zero3.json"
+
+# GPU配置 - 4卡4090
+gpu:
+  sampling_gpu: 3            # 第4张卡用于采样
+  training_gpu: [0, 1, 2]    # 前3张卡用于训练
+  # 或者4卡全部用于训练，采样用CPU
+
+# 检查点配置
+checkpoint:
+  ckpt_dir: "./checkpoints/qwen3_4b_grpo"
+  ckpt_file: "ckpt.pt"
+  save_total_limit: 5        # 最多保留5个checkpoint
+
+# LoRA配置（可选，如显存不足时启用）
+lora:
+  enabled: false             # 4卡4090显存充足，建议全量微调
+  adapter_dir: "./lora_adapter"
+  rank: 64
+  alpha: 128
+  learning_rate: 1e-4
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+# WandB配置
+wandb:
+  enabled: true
+  project: "paper-summary-grpo"
+  name: "qwen3-4b-grpo-4x4090"
+  tags: ["qwen3", "4b", "grpo", "paper-summary", "arxiv"]
+  log_interval: 10           # 每10步记录一次
+  log_artifacts: true        # 保存模型artifact
+
+# 奖励函数配置
+reward:
+  use_llm_judge: false       # 初期使用规则奖励
+  nli_model: "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+  weights:
+    summary: 0.30
+    algorithm: 0.25
+    comparison: 0.25
+    keyword_problem: 0.10
+    keyword_algorithm: 0.10

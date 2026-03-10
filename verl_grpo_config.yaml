@@ -1,0 +1,86 @@
+# VERL + GRPO 训练配置文件
+# 用于论文总结任务的强化学习训练
+
+# 模型配置
+model:
+  path: "Qwen/Qwen3-4B-Instruct"  # 或本地路径
+  tokenizer_path: "Qwen/Qwen3-4B-Instruct"
+  trust_remote_code: true
+
+# 数据配置
+data:
+  train_files: "train/data/paper_train.parquet"
+  val_files: "train/data/paper_val.parquet"
+  prompt_key: "prompt"
+  reward_key: "ground_truth"
+  max_prompt_length: 8192
+  max_response_length: 2048
+  train_batch_size: 128  # 总批次大小
+  val_batch_size: 64
+
+# GRPO算法配置
+algorithm:
+  name: "grpo"
+  
+  # GRPO特定参数
+  num_generations: 4        # 每组采样数 (G)
+  kl_coeff: 0.04           # KL惩罚系数 (β)
+  clip_ratio: 0.2          # PPO裁剪参数 (ε)
+  
+  # 优化器参数
+  learning_rate: 1e-6
+  lr_scheduler: "cosine"
+  warmup_steps: 100
+  total_training_steps: 2000
+  
+  # 奖励函数配置
+  reward_function:
+    type: "rule_based"     # 或 "model_based"
+    weights:
+      summary: 0.30
+      algorithm: 0.25
+      comparison: 0.25
+      keyword_problem: 0.10
+      keyword_algorithm: 0.10
+
+# 训练配置
+training:
+  n_gpus: 4                # 4卡4090
+  nnodes: 1
+  
+  # 并行策略
+  parallelism:
+    data_parallel_size: 4   # 数据并行度
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    
+  # 生成配置
+  generation:
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 50
+    use_cache: true
+    
+  # 检查点
+  checkpoint:
+    save_interval: 200
+    output_dir: "./verl_checkpoints"
+    
+  # 日志
+  logging:
+    log_interval: 10
+    eval_interval: 50
+
+# WandB配置
+wandb:
+  enabled: true
+  project: "paper-summary-verl-grpo"
+  name: "qwen3-4b-grpo-4x4090"
+  tags: ["verl", "grpo", "qwen3", "paper-summary"]
+
+# vLLM配置 (用于快速生成)
+vllm:
+  enabled: true
+  gpu_memory_utilization: 0.85
+  tensor_parallel_size: 1
+  max_num_seqs: 256
