@@ -96,7 +96,7 @@ def build_verl_item(item, idx, task_type="paper_summary"):
         "extra_info": {
             "split": "train",
             "index": idx,
-            "original_instruction": instruction[:200] if len(instruction) > 200 else instruction,  # 保留部分原始信息
+            "original_instruction": instruction,  # 保留原始信息
             "paper_title": extract_title(instruction)
         }
     }
@@ -120,9 +120,9 @@ def extract_title(instruction):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="将论文总结数据转换为 verl RL 训练格式（流式处理版）")
-    parser.add_argument("--input", default=r"D:\python\code\model_paper_search\data\paper_test.json", 
+    parser.add_argument("--input", default=r"D:\python\code\paper_retrieve\data\paper_test.json", 
                         help="输入 JSON 文件路径")
-    parser.add_argument("--output", default=r"D:\python\code\model_paper_search\data\data_verl\paper_test.parquet", 
+    parser.add_argument("--output", default=r"D:\python\code\paper_retrieve\data\data_verl\paper_test.parquet", 
                         help="输出 Parquet 文件路径")
     parser.add_argument("--batch-size", type=int, default=500, 
                         help="批处理大小，默认 500")

@@ -1,4 +1,4 @@
-# Qwen3-4B 论文总结模型训练指南
+# Qwen3-4B-Instruct-2507 论文总结模型训练指南
 
 ## 📋 环境准备
 
@@ -18,14 +18,10 @@
 ```bash
 # 克隆项目
 git clone <your-repo>
-cd model_paper_search
+cd paper_retrieve
 
 # 安装依赖
 pip install -r requirements.txt
-
-# 额外安装Qwen3支持
-pip install transformers>=4.40.0
-pip install deepspeed>=0.14.0
 pip install wandb
 
 # 登录WandB
@@ -35,16 +31,8 @@ wandb login
 ### 3. 模型下载
 
 ```bash
-# 使用modelscope下载（国内更快）
-pip install modelscope
-
-python -c "
-from modelscope import snapshot_download
-snapshot_download('Qwen/Qwen3-4B-Instruct', cache_dir='./models')
-"
-
-# 或使用huggingface
-huggingface-cli download Qwen/Qwen3-4B-Instruct --local-dir ./models/Qwen3-4B-Instruct
+# 使用git下载模型 (请确保 lfs 已经被正确安装)
+git clone https://www.modelscope.cn/Qwen/Qwen3-4B-Instruct-2507.git
 ```
 
 ---
@@ -54,12 +42,7 @@ huggingface-cli download Qwen/Qwen3-4B-Instruct --local-dir ./models/Qwen3-4B-In
 ### 阶段一：SFT监督微调（约2-3小时）
 
 ```bash
-# 启动SFT训练
-python train/training_pipeline.py \
-    --config train/config_qwen3_4b.yaml \
-    --data train/data/paper_train.json \
-    --output_dir ./output \
-    --stage sft
+
 ```
 
 **SFT阶段目标**：
@@ -78,18 +61,7 @@ python train/training_pipeline.py \
 #### 2.1 启动采样进程
 
 ```bash
-# 在单独终端启动采样进程
-python train/sampling_worker.py --config train/config_qwen3_4b.yaml
-```
 
-#### 2.2 启动训练进程
-
-```bash
-# 使用DeepSpeed启动3卡训练（留1卡给采样）
-CUDA_VISIBLE_DEVICES=0,1,2 deepspeed --num_gpus=3 train/training_worker.py --config train/config_qwen3_4b.yaml
-
-# 或使用4卡全部训练，采样用CPU
-# CUDA_VISIBLE_DEVICES=0,1,2,3 deepspeed --num_gpus=4 train/training_worker.py --config train/config_qwen3_4b.yaml
 ```
 
 **GRPO阶段目标**：
@@ -280,7 +252,7 @@ llm = LLM(
 - [ds_config_zero3.json](train/ds_config_zero3.json) - DeepSpeed配置
 - [wandb_logger.py](train/wandb_logger.py) - WandB日志模块
 - [training_pipeline.py](train/training_pipeline.py) - 完整训练流程
-- [reward.py](train/reward.py) - 奖励函数实现
+- [reward.py][def] - 奖励函数实现
 
 ---
 
@@ -290,3 +262,6 @@ llm = LLM(
 1. WandB日志: https://wandb.ai/<your-username>/paper-summary-grpo
 2. 本地日志: `logs/train_*.log`
 3. 可视化: `visualizations/` 目录
+
+
+[def]: train/reward.py

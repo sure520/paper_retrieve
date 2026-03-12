@@ -102,6 +102,11 @@ def default_compute_score(
         from . import search_r1_like_qa_em
 
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
+    elif data_source == "paper_summary":
+        from . import paper_summary
+
+        res = paper_summary.compute_score(data_source, solution_str, ground_truth, extra_info)
+        pass
 
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")

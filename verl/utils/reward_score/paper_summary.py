@@ -1,107 +1,11 @@
-# 论文总结模型 GRPO 训练奖励函数设计方案
-
-## 1. 任务背景与数据特点
-
-### 1.1 原始数据格式（JSON）
-原始训练数据格式：
-```json
-{
-    "instruction": "任务指令 + 论文原文",
-    "input": "",
-    "output": "标准答案JSON字符串"
-}
-```
-
-- **instruction**: 包含完整指令 + 论文全文（title, abstract, body）
-- **output**: 结构化 JSON 字符串，包含 5 个字段：
-  - `summary`: 论文概览（场景、问题、方法、效果）
-  - `algorithm`: 算法详细介绍（核心思想、创新点、实现步骤）
-  - `compare_result`: 核心对比算法及对比结果
-  - `keyword_problem`: 研究场景和业务问题的关键词（中英文+缩写）
-  - `keyword_algorithm`: 算法关键词（中英文+缩写）
-
-### 1.2 训练数据格式（Parquet for verl）
-经过 `data_convert_to_verl_rl.py` 转换后的 verl 训练格式：
-```python
-{
-    "data_source": "paper_summary",
-    "prompt": [
-        {"role": "system", "content": "你是一个专业的学术论文分析专家..."},
-        {"role": "user", "content": "<原始instruction内容>"}
-    ],
-    "ability": "academic_summarization",
-    "reward_model": {
-        "style": "rule",
-        "ground_truth": "<JSON字符串格式的标准答案>",
-        "ground_truth_dict": {<标准答案字典>}
-    },
-    "extra_info": {
-        "split": "train",
-        "index": 0,
-        "original_instruction": "<原始instruction内容（包含论文原文）>",
-        "paper_title": "<论文标题>"
-    }
-}
-```
-
-### 1.3 奖励函数的输入
-在 verl 框架中，奖励函数接收：
- `data_source`、`solution_str`、`ground_truth` 和 `extra_info`
-1. **data_source**: 数据源名称，如 "paper_summary"
-2. **solution_str**: 模型生成的 JSON 字符串
-3. **ground_truth**: 标准答案 JSON 字符串
-4. **extra_info**: 额外信息，需包含 "original_instruction" 字段（包含论文原文）
-
-奖励设计核心：**对比模型生成与 ground_truth 的相似度**，同时验证与原文的一致性。
-
-### 1.4 输出格式特点
-- 所有字段均为字符串类型
-- 关键词字段使用特定分隔符：`,` 分隔中英文/缩写，`;` 分隔不同关键词
-- 算法字段包含结构化内容（核心思想、创新点、实现步骤）
-
----
-
-## 2. GRPO 奖励函数设计原则
-
-GRPO (Group Relative Policy Optimization) 的特点：
-1. **组内相对奖励**：同一问题的多个回答之间进行相对比较
-2. **无需价值模型**：通过组内奖励归一化替代 Critic 网络
-3. **奖励信号要求**：需要稳定、可区分、与生成质量正相关的奖励
-
-设计原则：
-- **可自动化计算**：避免依赖外部 LLM 评判（成本高、延迟大）
-- **细粒度分解**：将总奖励拆分为多个可解释的子奖励
-- **规则与模型结合**：基础检查用规则，语义匹配用轻量模型
-- **数值稳定性**：奖励范围控制在 [0, 1]，避免极端值
-
----
-
-## 3. 奖励函数详细设计
-
-### 3.1 verl框架奖励函数规范
-
-根据 verl 框架规范，奖励函数签名应为：
-
-```python
-def compute_score(
-    data_source: str,      # 数据源名称，如 "paper_summary"
-    solution_str: str,     # 模型生成的响应字符串（JSON格式）
-    ground_truth: str,     # 标准答案字符串（JSON格式）
-    extra_info: dict = None  # 额外信息，包含<原始instruction内容>等
-) -> float:
-    """
-    计算论文总结模型的综合奖励（适配verl框架）
-    返回范围: [0.0, 1.0]
-    """
-    pass
-```
-
-### 3.2 奖励函数实现
-
-```python
 import json
 import re
-from typing import Optional
+import os
+from dotenv import load_dotenv
+load_dotenv()
+from typing import Optional, List, Set
+import dashscope
+
 
 def compute_score(
     data_source: str,
@@ -185,11 +89,8 @@ def compute_score(
     )
     
     return total_reward * format_reward
-```
 
-### 3.3 辅助函数
 
-```python
 def extract_paper_from_instruction(instruction: str) -> str:
     """
     从 instruction 中提取论文原文
@@ -199,29 +100,12 @@ def extract_paper_from_instruction(instruction: str) -> str:
     if marker in instruction:
         return instruction.split(marker, 1)[1].strip()
     return instruction
-```
 
-### 3.4 数据格式说明
 
-根据实际训练数据格式，`extra_info` 包含：
-- `original_instruction`: 原始指令内容（包含论文原文）
-- `paper_title`: 论文标题
-
-奖励函数从 `extra_info["original_instruction"]` 中提取论文原文用于事实一致性验证。
-
-### 3.2 各维度奖励详细设计
-
-#### 3.2.1 格式合规性奖励 (Format Compliance)
-
-**检查项**（全部通过得1.0，任一失败得0）：
-1. JSON 格式合法，可被正确解析
-2. 包含全部 5 个必需字段
-3. 所有字段值为非空字符串
-4. 关键词字段格式符合要求（中英文用逗号分隔，关键词间用分号分隔）
-
-**伪代码**：
-```python
 def check_format_compliance(output: dict) -> float:
+    """
+    检查输出格式是否合规
+    """
     required_keys = ["summary", "algorithm", "compare_result", "keyword_problem", "keyword_algorithm"]
 
     # 检查字段存在性
@@ -240,8 +124,11 @@ def check_format_compliance(output: dict) -> float:
 
     return 1.0
 
+
 def validate_keyword_format(keyword_str: str) -> bool:
-    """验证关键词格式: 中文, English, Abbr; 中文2, English2"""
+    """
+    验证关键词格式: 中文, English, Abbr; 中文2, English2
+    """
     if not keyword_str:
         return False
     keywords = keyword_str.split(";")
@@ -250,22 +137,13 @@ def validate_keyword_format(keyword_str: str) -> bool:
         if len(parts) < 2:  # 至少要有中英文
             return False
     return True
-```
 
----
 
-#### 3.2.2 Summary 奖励 (权重: 0.25)
-
-**评估维度**：
-1. **与参考答案相似度** (50%)：语义相似度 + 关键词重叠
-2. **内容完整性** (30%)：是否包含问题、方法、效果三要素
-3. **事实一致性** (20%)：与原文关键信息的匹配度
-
-**伪代码**：
-```python
 def reward_summary(paper: str, gen_summary: str, ref_summary: str) -> float:
+    """
+    计算 summary 部分的奖励
+    """
     # 1. 与参考答案的相似度（核心）
-    # 1.1 语义相似度（使用embedding模型）
     semantic_sim = compute_semantic_similarity(gen_summary, ref_summary)
 
     # 1.2 关键词重叠度
@@ -287,21 +165,12 @@ def reward_summary(paper: str, gen_summary: str, ref_summary: str) -> float:
     fact_overlap = len(set(gen_summary_keywords) & set(paper_keywords)) / max(len(gen_summary_keywords), 1)
 
     return 0.5 * reference_sim + 0.3 * completeness + 0.2 * fact_overlap
-```
 
----
 
-#### 3.2.3 Algorithm 奖励 (权重: 0.30)
-
-**评估维度**（这是核心字段，权重最高）：
-1. **与参考答案相似度** (40%)：语义相似度 + 结构匹配
-2. **结构完整性** (25%)：是否包含核心思想、创新点、实现步骤
-3. **步骤清晰度** (20%)：是否有明确的步骤编号或流程描述
-4. **技术术语匹配** (15%)：与参考答案的技术术语重叠度
-
-**伪代码**：
-```python
 def reward_algorithm(paper: str, gen_algo: str, ref_algo: str) -> float:
+    """
+    计算 algorithm 部分的奖励
+    """
     # 1. 与参考答案的相似度（核心）
     semantic_sim = compute_semantic_similarity(gen_algo, ref_algo)
 
@@ -330,21 +199,12 @@ def reward_algorithm(paper: str, gen_algo: str, ref_algo: str) -> float:
     technical_score = term_overlap
 
     return 0.4 * reference_sim + 0.25 * structure_score + 0.2 * clarity_score + 0.15 * technical_score
-```
 
----
 
-#### 3.2.4 Compare Result 奖励 (权重: 0.20)
-
-**评估维度**：
-1. **与参考答案相似度** (40%)：语义相似度 + 对比方法重叠
-2. **对比完整性** (30%)：是否包含基准方法、评价指标、具体数值
-3. **数值准确性** (20%)：数值格式是否正确（百分比、小数）
-4. **方法识别** (10%)：是否正确识别了对比方法名称
-
-**伪代码**：
-```python
 def reward_comparison(paper: str, gen_compare: str, ref_compare: str) -> float:
+    """
+    计算 compare_result 部分的奖励
+    """
     if not gen_compare or len(gen_compare) < 20:
         return 0.0
 
@@ -387,20 +247,12 @@ def reward_comparison(paper: str, gen_compare: str, ref_compare: str) -> float:
     method_score = method_overlap
 
     return 0.4 * reference_sim + 0.3 * completeness + 0.2 * number_quality + 0.1 * method_score
-```
 
----
 
-#### 3.2.5 Keywords Problem 奖励 (权重: 0.125)
-
-**评估维度**：
-1. **与参考答案匹配度** (50%)：关键词重叠度
-2. **格式正确性** (25%)：中英文+缩写格式是否符合要求
-3. **语义相关性** (25%)：关键词是否与论文主题相关
-
-**伪代码**：
-```python
 def reward_keywords_problem(paper: str, gen_kw: str, ref_kw: str) -> float:
+    """
+    计算 keyword_problem 部分的奖励
+    """
     if not gen_kw:
         return 0.0
 
@@ -442,20 +294,12 @@ def reward_keywords_problem(paper: str, gen_kw: str, ref_kw: str) -> float:
     relevance = compute_keyword_relevance(paper, chinese_parts)
 
     return 0.5 * f1_score + 0.25 * format_score + 0.25 * relevance
-```
 
----
 
-#### 3.2.6 Keywords Algorithm 奖励 (权重: 0.125)
-
-**评估维度**：
-1. **与参考答案匹配度** (50%)：关键词重叠度
-2. **格式正确性** (25%)
-3. **算法识别** (25%)：是否正确识别论文提出的算法名称
-
-**伪代码**：
-```python
 def reward_keywords_algorithm(paper: str, gen_kw: str, ref_kw: str) -> float:
+    """
+    计算 keyword_algorithm 部分的奖励
+    """
     if not gen_kw:
         return 0.0
 
@@ -504,126 +348,171 @@ def reward_keywords_algorithm(paper: str, gen_kw: str, ref_kw: str) -> float:
     method_score = min(1.0, matched / max(1, len(proposed_methods))) if proposed_methods else 0.5
 
     return 0.5 * f1_score + 0.25 * format_score + 0.25 * method_score
-```
 
----
 
-## 4. GRPO 组内奖励归一化
-
-在 GRPO 中，需要对同一组内的奖励进行归一化处理：
-
-```python
-def compute_grpo_advantage(rewards: list[float], eps: float = 1e-8) -> list[float]:
+def extract_keywords(text: str, top_k: int = 10) -> List[str]:
     """
-    计算组内相对优势
+    简单的关键词提取（基于词频）
     """
-    mean_reward = np.mean(rewards)
-    std_reward = np.std(rewards)
+    if not text:
+        return []
+    
+    # 简单的中文分词（基于正则）
+    import re
+    # 提取中文词语
+    chinese_words = re.findall(r'[\u4e00-\u9fff]+', text)
+    # 提取英文单词
+    english_words = re.findall(r'[a-zA-Z]+', text)
+    # 提取数字+单位
+    numbers = re.findall(r'\d+\.?\d*[%a-zA-Z]*', text)
+    
+    all_words = chinese_words + english_words + numbers
+    
+    # 简单词频统计
+    word_count = {}
+    for word in all_words:
+        if len(word) > 1:  # 过滤单字
+            word_count[word] = word_count.get(word, 0) + 1
+    
+    # 按词频排序，取前 top_k
+    sorted_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)
+    return [word for word, _ in sorted_words[:top_k]]
 
-    # 归一化
-    advantages = [(r - mean_reward) / (std_reward + eps) for r in rewards]
-    return advantages
-```
 
----
+def compute_semantic_similarity_fallback(text1: str, text2: str) -> float:
+    """
+    计算语义相似度（兜底方案，基于词重叠）
+    """
+    if not text1 or not text2:
+        return 0.0
+    
+    # 提取关键词
+    keywords1 = set(extract_keywords(text1, top_k=20))
+    keywords2 = set(extract_keywords(text2, top_k=20))
+    
+    # 计算 Jaccard 相似度
+    intersection = len(keywords1 & keywords2)
+    union = len(keywords1 | keywords2)
+    
+    return intersection / union if union > 0 else 0.0
 
-## 5. 辅助函数实现建议
 
-### 5.1 关键词提取
-```python
-def extract_keywords(text: str, top_k: int = 10) -> list[str]:
-    """使用 TF-IDF 或简单词频提取关键词"""
-    # 可使用 jieba 进行中文分词
-    # 或使用 sklearn 的 TfidfVectorizer
-    pass
-```
-
-### 5.2 语义相似度计算
-```python
 def compute_semantic_similarity(text1: str, text2: str) -> float:
     """
-    使用轻量 embedding 模型计算语义相似度
-    建议模型: BGE-small-zh, GTE-small 等
+    计算语义相似度（主要使用 LLM，失败时使用兜底方案）
     """
-    # 1. 文本编码
-    # 2. 计算余弦相似度
-    pass
-```
+    # 主要使用 LLM 计算相似度
+    return compute_similarity_with_llm(text1, text2)
 
-### 5.3 方法名提取
-```python
-def extract_proposed_methods(paper: str) -> list[str]:
+def compute_similarity_with_llm(text1: str, text2: str, model_name: str = "qwen-plus") -> float:
+    """
+    使用 LLM 计算文本相似度
+    """
+    prompt = f"""你是一个专业的语义相似度评估专家。请对给出的两句话进行语义相似度打分，
+句子1: {text1}
+句子2: {text2}
+
+输出打分标准：
+1.0：语义完全相同。
+0.7～0.9：语义高度相似。
+0.4～0.6：语义中等相关。
+0.1～0.3：语义微弱相关。
+0.0：完全无关。
+
+输出要求：
+1. 严格按照以下JSON格式输出，不要添加任何多余文字、解释或换行；
+2. 字段说明：
+    - score：0-1的小数，语义相似度分数（1.0完全相同，0.0完全无关）；
+    - reason：简短说明打分理由（不超过50字）；
+3. JSON输出示例：
+    {{
+        "score": 0.9,
+        "reason": "两句话语义高度相似，仅表述略有差异"
+    }}"""
+    messages = [
+        {"role": "user", "content": prompt}
+    ]
+    if not text1 or not text2:
+        return 0.0
+    
+    # 调用 LLM 模型计算相似度
+    response = dashscope.Generation.call(
+        # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx"
+        api_key=os.getenv('DASHSCOPE_API_KEY'),
+        model=model_name, # 此处以qwen-plus为例，可按需更换模型名称。模型列表：https://help.aliyun.com/zh/model-studio/getting-started/models
+        messages=messages,
+        result_format='json',
+        temperature=0.1
+    )
+    # 4. 解析响应（结构化数据）
+    if response.status_code == 200:
+        # 提取 JSON 结果
+        structured_result = response.output.choices[0].message.content
+        # 转换为 Python 字典（方便后续处理）
+        import json
+        try:
+            result_dict = json.loads(structured_result)
+            return result_dict.get("score", 0.5)
+        except json.JSONDecodeError:
+            return compute_semantic_similarity_fallback(text1, text2)
+    else:
+        return compute_semantic_similarity_fallback(text1, text2)
+
+
+
+def compute_keyword_relevance(paper: str, keywords: List[str]) -> float:
+    """
+    计算关键词与论文的相关性
+    """
+    if not paper or not keywords:
+        return 0.5
+    
+    paper_lower = paper.lower()
+    relevance_scores = []
+    
+    for keyword in keywords:
+        if keyword.lower() in paper_lower:
+            relevance_scores.append(1.0)
+        else:
+            relevance_scores.append(0.0)
+    
+    return sum(relevance_scores) / len(relevance_scores) if relevance_scores else 0.5
+
+
+def extract_proposed_methods(paper: str) -> List[str]:
     """
     从论文中提取提出的方法名
-    规则：
-    1. 标题中的专有名词
-    2. "we propose XXX", "we introduce XXX", "called XXX" 等句式
-    3. 大写字母缩写
     """
+    if not paper:
+        return []
+    
     patterns = [
-        r"we propose[d]?\s+([A-Z][a-zA-Z0-9\-]+",
+        r"we propose[d]?\s+([A-Z][a-zA-Z0-9\-]+)",
         r"called\s+([A-Z][a-zA-Z0-9\-]+)",
         r"named\s+([A-Z][a-zA-Z0-9\-]+)",
-        r"([A-Z]{2,})"  # 大写缩写
+        r"\b([A-Z]{2,})\b"  # 大写缩写
     ]
+    
     methods = []
     for pattern in patterns:
         matches = re.findall(pattern, paper, re.IGNORECASE)
         methods.extend(matches)
+    
     return list(set(methods))
-```
 
----
 
-## 6. 训练建议
-
-### 6.1 分阶段训练
-1. **第一阶段**：重点优化格式合规性和基础内容完整性
-2. **第二阶段**：引入语义相似度奖励，提升内容质量
-3. **第三阶段**：精细化调整各维度权重
-
-### 6.2 奖励裁剪与稳定性
-```python
-# 对极端奖励值进行裁剪
-total_reward = np.clip(total_reward, 0.0, 1.0)
-
-# 添加 small epsilon 避免除零
-advantages = [(r - mean_r) / (std_r + 1e-8) for r in rewards]
-```
-
-### 6.3 监控指标
-- 各维度奖励的平均值和标准差
-- 格式合规率
-- KL 散度（监控策略偏离）
-- 生成文本的平均长度
-
----
-
-## 7. 权重调优参考
-
-初始权重配置：
-| 维度 | 权重 | 说明 |
-|------|------|------|
-| summary | 0.25 | 论文概览质量 |
-| algorithm | 0.30 | 算法描述质量（核心） |
-| compare_result | 0.20 | 对比结果质量 |
-| keyword_problem | 0.125 | 问题关键词 |
-| keyword_algorithm | 0.125 | 算法关键词 |
-
-调优建议：
-- 如果算法描述质量不稳定，可适当提高 algorithm 权重
-- 如果关键词格式问题较多，可增加格式检查惩罚力度
-- 根据验证集人工评估结果微调权重
-
----
-
-## 8. 总结
-
-本奖励函数设计方案针对论文总结任务的特点，设计了 5 个维度的细粒度奖励：
-1. **格式合规性**：硬约束，确保输出结构正确
-2. **Summary 质量**：内容完整性、事实一致性、长度合理性
-3. **Algorithm 质量**：结构完整性、步骤清晰度、创新点描述
-4. **Compare Result 质量**：对比完整性、数值准确性
-5. **Keywords 质量**：格式正确性、语义相关性
-
-该方案结合了规则检查和轻量语义模型，既保证了计算效率，又能有效评估生成质量，适合 GRPO 训练框架。
+if __name__ == "__main__":
+    # 批量测试示例（覆盖0-1分）
+    test_cases = [
+        ("我周末想去上海迪士尼乐园游玩", "周末我打算去上海迪士尼乐园玩"),
+        ("今天下午我要去超市买牛奶和面包", "今日午后我计划到超市采购牛奶与面包"),
+        ("小明每天早上7点跑步30分钟", "小明每天早晨7点左右跑步半小时"),
+        ("公司下周要组织员工去团建旅游", "公司下个月计划安排员工外出活动"),
+        ("夏天适合吃西瓜解暑", "夏天适合喝绿豆汤降温"),
+        ("猫咪喜欢在阳光下睡觉", "手机充满电需要大约2小时")
+    ]
+    for i, test in enumerate(test_cases):
+        print(f"测试案例 {i+1}: {test}")
+        score = compute_similarity_with_llm(test[0], test[1])
+        print(type(score))
+        print(score)
