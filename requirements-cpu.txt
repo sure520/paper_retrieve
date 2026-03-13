@@ -53,7 +53,7 @@ ijson
 # ============================================
 # 6. 文本/数学处理
 # ============================================
-googletrans==4.0.0rc1
+googletrans==4.0.2
 latex2sympy2_extended
 math-verify
 pylatexenc
