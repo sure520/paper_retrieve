@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .multiturn_sft_dataset import MultiTurnSFTDataset
+from .paper_summary_sft_dataset import PaperSummarySFTDataset
 from .rl_dataset import RLHFDataset
 from .rm_dataset import RMDataset
 
-__all__ = ["RLHFDataset", "RMDataset"]
+__all__ = ["RLHFDataset", "RMDataset", "MultiTurnSFTDataset", "PaperSummarySFTDataset"]
