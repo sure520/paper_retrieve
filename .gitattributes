@@ -1,0 +1,11 @@
+# .gitattributes 文件内容（直接复制到项目根目录）
+# 所有文件默认使用 LF 换行符，提交时转换，检出时不转换
+* text=auto eol=lf
+
+# 二进制文件（图片、编译文件等）不转换换行符
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.tar.gz binary
