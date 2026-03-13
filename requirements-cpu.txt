@@ -88,7 +88,7 @@ requests==2.32.5
 # 如需使用 grobid-client，请注释掉 googletrans 或升级 grobid-client 版本
 # grobid-client==0.8.8
 grobid-client-python==0.1.2
-pymupdf==1.26.7
+pymupdf==1.27.2
 
 # ============================================
 # 11. 可选依赖（CPU 版本通常不需要）
