@@ -51,7 +51,18 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def _with_routing_replay_flag(enabled: bool):
-    """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
+    """
+    装饰器工厂函数：为数据 TensorDict 设置 'enable_routing_replay' 标志
+    
+    该装饰器用于在 Megatron 策略的路由重放模式下，
+    自动为输入数据添加路由重放标志，确保训练和推理的一致性。
+    
+    Args:
+        enabled: 是否启用路由重放标志
+        
+    Returns:
+        装饰器函数
+    """
 
     def decorator(func):
         @functools.wraps(func)
@@ -67,16 +78,47 @@ def _with_routing_replay_flag(enabled: bool):
 
 class TrainingWorker(Worker, DistProfilerExtension):
     """
-    TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
-    to a single controller. Currently, we only provide more coarse grained APIs,
-    and do not provide exact APIs as Tinker does. But this can be added in the future.
+    训练工作器类
+    
+    提供类似 Tinker 的 API (https://thinkingmachines.ai/tinker/) 作为 RayWorkerGroup
+    供单控制器使用。目前提供较粗粒度的 API，未来可以扩展更细粒度的接口。
+    
+    主要功能：
+    - 管理模型训练引擎的生命周期
+    - 执行训练批次和推理批次
+    - 支持检查点保存和加载
+    - 集成分布式性能分析工具
+    
+    核心方法：
+    - train_batch: 执行单个批次的训练
+    - train_mini_batch: 将批次拆分为多个 mini-batch 进行多 epoch 训练
+    - infer_batch: 执行推理（前向传播）
+    - save_checkpoint/load_checkpoint: 检查点管理
+    
+    Attributes:
+        config: TrainingWorkerConfig 配置对象
+        model_config: 模型配置
+        engine_config: 引擎配置
+        optimizer_config: 优化器配置
+        checkpoint_config: 检查点配置
+        device_name: 设备名称（cuda/npu/cpu）
+        engine: 训练引擎实例
+        flops_counter: FLOPS 计数器，用于计算 MFU
+        loss_fn: 损失函数
     """
 
     def __init__(self, config: TrainingWorkerConfig):
+        """
+        初始化训练工作器
+        
+        Args:
+            config: TrainingWorkerConfig 配置对象，包含模型、引擎、优化器等配置
+        """
         Worker.__init__(self)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
 
+        # 初始化 Ray 分布式进程组
         initialize_global_process_group_ray(timeout_second=None)
 
         self.config = config
@@ -86,6 +128,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.checkpoint_config = self.config.checkpoint_config
         self.device_name = get_device_name()
 
+        # 如果未提供引擎配置，则自动选择引擎后端
         if self.engine_config is None:
             assert self.optimizer_config is None
             if self.config.auto_select_engine_optim_fn is None:
@@ -93,21 +136,21 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     "engine_config is not provided and auto_select_engine_optim_fn is not set. "
                     "Cannot determine engine backend."
                 )
-            # Support automatically select engine backend given model config
+            # 根据模型配置自动选择引擎后端
             self.engine_config, self.optimizer_config = self.config.auto_select_engine_optim_fn(
                 self.model_config, self.device_name
             )
 
-        # we use the one defined in model
-        # TODO: this is not elegant and should refactor later
+        # 使用模型配置中定义的参数
+        # TODO: 这不够优雅，后续需要重构
         self.engine_config.use_remove_padding = self.model_config.use_remove_padding
         self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
 
+        # NPU MindSpeed 补丁，后续会使用 MindSpeedEngine 重构
         if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
             repatch(self.engine_config.get("override_transformer_config", {}))
 
-        # TODO: add DistProfilerExtension
+        # 初始化分布式性能分析器
         self.profiler_config = self.config.profiler_config
         if self.profiler_config is not None:
             self.profiler_tool_config = self.profiler_config.tool_config.get(self.profiler_config.tool, {})
@@ -118,6 +161,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self, DistProfiler(rank=self.rank, config=self.profiler_config, tool_config=self.profiler_tool_config)
         )
 
+        # 创建训练引擎实例
         self.engine: BaseEngine = EngineRegistry.new(
             model_type=self.config.model_type,
             backend=self.engine_config.strategy,
@@ -127,20 +171,29 @@ class TrainingWorker(Worker, DistProfilerExtension):
             checkpoint_config=self.checkpoint_config,
         )
 
-        # build dispatch info
+        # 注册分发收集信息，用于分布式训练
         self._register_dispatch_collect_info(
             mesh_name="train",
             dp_rank=self.engine.get_data_parallel_rank(),
             is_collect=self.engine.is_mp_src_rank_with_outputs(),
         )
 
+        # 初始化 FLOPS 计数器，用于计算模型浮点运算量
         self.flops_counter = FlopsCounter(self.model_config.hf_config)
 
         self.loss_fn = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
-        """Manual control of load/offload"""
+        """
+        手动控制模型/优化器的加载/卸载
+        
+        Args:
+            device: 目标设备，"cpu" 或 "device"（当前设备）
+            model: 是否移动模型参数
+            optimizer: 是否移动优化器状态
+            grad: 是否移动梯度
+        """
         assert device in ["cpu", "device"]
 
         if device == "device":
@@ -150,24 +203,42 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_loss_fn(self, loss_fn):
+        """
+        设置损失函数
+        
+        Args:
+            loss_fn: 损失函数，接收模型输出，返回损失值
+        """
         self.loss_fn = loss_fn
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset(self):
         """
-        Reset the model engine to the initial state. If the engine is not initialized,
-        we initialize it. Otherwise, reload ckpt and reset states
+        重置模型引擎到初始状态
+        
+        如果引擎未初始化，则进行初始化；
+        否则重新加载检查点并重置状态。
         """
         self.engine.initialize()
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
-
+        后处理输出结果
+        
+        对训练/推理输出进行后处理，包括：
+        - 在数据并行组内聚合损失和指标
+        - 计算 MFU（模型浮点运算利用率）
+        - 整理输出格式
+        
         Args:
-            output: a dictionary containing loss, model_outputs and metrics
-
+            output: 包含 loss、model_outputs 和 metrics 的字典
+            global_token_num: 全局 token 数量列表
+            delta_time: 执行时间
+            forward_only: 是否仅前向传播（推理模式）
+            images_seqlens: 图像序列长度（多模态场景）
+            
         Returns:
-
+            TensorDict: 包含处理后指标的输出
         """
         # TODO: whether to log memory
         # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024 ** 3)
@@ -220,13 +291,23 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_mini_batch(self, data: TensorDict) -> TensorDict:
-        """Split a batch into N mini-batches run for multiple epochs
-
+        """
+        将批次拆分为多个 mini-batch 进行多 epoch 训练
+        
+        用于 PPO 等需要对同一批数据进行多次迭代的训练场景。
+        将输入数据拆分为多个 mini-batch，每个 mini-batch 执行一次训练，
+        支持多个 epoch 的迭代。
+        
         Args:
-            data:
-
+            data: 输入数据 TensorDict，包含：
+                - mini_batch_size: mini-batch 大小
+                - num_mini_batch: mini-batch 数量（与 mini_batch_size 二选一）
+                - epochs: 迭代 epoch 数
+                - seed: 随机种子
+                - dataloader_kwargs: 数据加载器额外参数
+                
         Returns:
-
+            TensorDict: 包含聚合后的训练指标
         """
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
@@ -304,6 +385,24 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def train_batch(self, data: TensorDict) -> TensorDict:
+        """
+        执行单个批次的训练
+        
+        执行前向传播、损失计算、反向传播和参数更新的完整训练流程。
+        
+        Args:
+            data: 输入数据 TensorDict，包含：
+                - input_ids: 输入 token ID
+                - attention_mask: 注意力掩码
+                - global_token_num: 全局 token 数量
+                - 其他模型所需输入
+                
+        Returns:
+            TensorDict: 包含训练指标（loss、grad_norm、lr、mfu 等）
+            
+        Raises:
+            AssertionError: 如果未设置损失函数或引擎配置为 forward_only
+        """
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
         assert not self.engine_config.forward_only, "Can't run `train_batch` when forward_only is in the engine config."
         # global_token_num should be a list of number of tokens of each seq in this batch
@@ -359,6 +458,23 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
+        """
+        执行推理批次（仅前向传播）
+        
+        用于验证、评估或计算参考模型的对数概率等场景。
+        可选择是否计算损失。
+        
+        Args:
+            data: 输入数据 TensorDict，包含：
+                - input_ids: 输入 token ID
+                - attention_mask: 注意力掩码
+                - compute_loss: 是否计算损失（默认 True）
+                - no_lora_adapter: 是否禁用 LoRA 适配器
+                - global_token_num: 全局 token 数量
+                
+        Returns:
+            TensorDict: 包含推理指标（loss、mfu 等）
+        """
         # add mfu calculator
         global_token_num = tu.get(data, key="global_token_num")
         compute_loss = tu.get(data, key="compute_loss", default=True)
@@ -405,21 +521,82 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+        """
+        保存检查点
+        
+        Args:
+            local_path: 本地保存路径
+            hdfs_path: HDFS 保存路径（可选）
+            global_step: 当前全局步数
+            max_ckpt_to_keep: 保留的最大检查点数量
+            
+        Returns:
+            保存结果
+        """
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
+        """
+        加载检查点
+        
+        Args:
+            local_path: 本地检查点路径
+            hdfs_path: HDFS 检查点路径（可选）
+            del_local_after_load: 加载后是否删除本地文件
+            
+        Returns:
+            加载结果
+        """
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
 
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
-    """Hybrid worker that includes actor model, rollout and optional ref model.
-    For standalone actor or rollout, use ActorWorker or BaseRollout respectively.
-
-    NOTE: ActorRolloutRefWorker no longer support spmd mode and run native server mode.
+    """
+    Actor/Rollout/Ref 混合工作器类
+    
+    集成了 Actor 模型、Rollout（采样）和可选的 Reference 模型的混合工作器。
+    用于 PPO/GRPO 等强化学习训练场景。
+    
+    支持的角色组合：
+    - actor: 仅 Actor 模型（用于训练）
+    - rollout: 仅 Rollout（用于采样）
+    - ref: 仅 Reference 模型（用于计算 KL 散度）
+    - actor_rollout: Actor + Rollout
+    - actor_rollout_ref: Actor + Rollout + Reference（完整 PPO 配置）
+    
+    注意：ActorRolloutRefWorker 不再支持 SPMD 模式，运行原生服务器模式。
+    
+    主要功能：
+    - 初始化 Actor、Reference 和 Rollout 组件
+    - 计算对数概率（Actor 和 Reference）
+    - 更新 Actor 参数
+    - 同步权重到 Rollout 引擎
+    - 检查点管理
+    
+    Attributes:
+        config: DictConfig 配置对象
+        role: 工作器角色（actor/rollout/ref/actor_rollout/actor_rollout_ref）
+        actor: TrainingWorker 实例（Actor 模型）
+        ref: TrainingWorker 实例（Reference 模型）
+        rollout: BaseRollout 实例（采样引擎）
+        checkpoint_engine: 检查点引擎（用于异步训练）
     """
 
     def __init__(self, config: DictConfig, role: str, **kwargs):
+        """
+        初始化 Actor/Rollout/Ref 混合工作器
+        
+        Args:
+            config: DictConfig 配置对象
+            role: 工作器角色，可选值：
+                - "actor": 仅 Actor 模型
+                - "rollout": 仅 Rollout
+                - "ref": 仅 Reference 模型
+                - "actor_rollout": Actor + Rollout
+                - "actor_rollout_ref": Actor + Rollout + Reference
+            **kwargs: 额外参数
+        """
         Worker.__init__(self)
         self.config = config
         self.role = role
@@ -458,15 +635,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_loss_fn(self, loss_fn):
+        """
+        设置 Actor 的损失函数
+        
+        Args:
+            loss_fn: 损失函数（如 PPO 损失）
+        """
         self.actor.set_loss_fn(loss_fn=loss_fn)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
-        """Manual control of load/offload"""
+        """
+        手动控制 Actor 模型/优化器的加载/卸载
+        
+        Args:
+            device: 目标设备
+            model: 是否移动模型参数
+            optimizer: 是否移动优化器状态
+            grad: 是否移动梯度
+        """
         self.actor.to(device=device, model=model, optimizer=optimizer, grad=grad)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        """
+        初始化模型组件
+        
+        按顺序初始化：
+        1. Reference 模型（如果角色包含 ref）
+        2. Actor 模型（如果角色包含 actor）
+        3. Rollout 引擎（如果角色包含 rollout）
+        4. 检查点引擎（如果角色包含 actor）
+        """
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
 
         # 1. build reference model
@@ -590,6 +790,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     @_with_routing_replay_flag(enabled=False)
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        """
+        计算 Reference 模型的对数概率
+        
+        用于 PPO 训练中计算 KL 散度惩罚项。
+        
+        Args:
+            data: 输入数据 TensorDict
+            
+        Returns:
+            TensorDict: 包含 Reference 模型的对数概率
+        """
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
@@ -597,6 +808,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     @_with_routing_replay_flag(enabled=True)
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
+        """
+        计算 Actor 模型的对数概率
+        
+        用于 PPO 训练中计算重要性采样比率。
+        
+        Args:
+            data: 输入数据 TensorDict
+            
+        Returns:
+            TensorDict: 包含 Actor 模型的对数概率
+        """
         output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None
@@ -605,27 +827,66 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        """
+        更新 Actor 模型参数
+        
+        执行 PPO 训练的核心更新步骤，包括：
+        - 多个 mini-batch 迭代
+        - 梯度计算和参数更新
+        
+        Args:
+            data: 输入数据 TensorDict，包含：
+                - input_ids: 输入 token
+                - old_log_probs: 旧策略对数概率
+                - advantages: 优势估计
+                - values: 价值估计
+                
+        Returns:
+            TensorDict: 包含训练指标
+        """
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
+        """
+        加载 Actor 检查点
+        
+        Args:
+            local_path: 本地检查点路径
+            hdfs_path: HDFS 检查点路径（可选）
+            del_local_after_load: 加载后是否删除本地文件
+        """
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+        """
+        保存 Actor 检查点
+        
+        Args:
+            local_path: 本地保存路径
+            hdfs_path: HDFS 保存路径（可选）
+            global_step: 当前全局步数
+            max_ckpt_to_keep: 保留的最大检查点数量
+        """
         assert "actor" in self.role, "save_checkpoint only support actor role"
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
-        """Update weights from trainer to rollout.
-
-        1. For sync training with colocated trainer and rollout, update rollout directly from model engine.
-           - before update_weights: rollout should be in sleep mode.
-           - after update_weights: rollout should be in wake_up mode.
-        2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
+        """
+        从训练器更新权重到 Rollout 引擎
+        
+        支持两种模式：
+        1. 同步训练（colocated）：直接从模型引擎更新权重到 Rollout
+           - 更新前：Rollout 应处于 sleep 模式
+           - 更新后：Rollout 应处于 wake_up 模式
+        2. 异步训练（disaggregated）：通过检查点引擎发送权重
+        
+        Args:
+            global_steps: 当前全局步数（可选）
         """
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
@@ -684,12 +945,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
-        """Execute checkpoint engine method.
-
+        """
+        执行检查点引擎方法
+        
+        用于异步训练场景，通过检查点引擎进行权重同步。
+        
         Args:
-            method (str): Checkpoint engine method name.
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-
+            method: 检查点引擎方法名称
+            *args: 位置参数
+            **kwargs: 关键字参数
+            
+        Returns:
+            检查点引擎方法的返回值
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
