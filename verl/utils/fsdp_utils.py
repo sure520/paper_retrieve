@@ -171,7 +171,17 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
 
 @torch.no_grad()
 def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
-    model.cpu()
+    # 显式将所有参数移动到 CPU，确保包括 LoRA 参数和 FSDP 包装的参数
+    # 使用 named_parameters() 确保遍历所有参数
+    for name, param in model.named_parameters():
+        if param.device.type != "cpu":
+            param.data = param.data.to("cpu", non_blocking=True)
+    
+    # buffers 保持在 GPU 上
+    device_id = get_device_id()
+    for buf in model.buffers():
+        buf.data = buf.data.to(device_id, non_blocking=True)
+    
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -467,24 +477,21 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         # use torch 2.7.0 copy from verl/third_party/torch/distributed/checkpoint
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
+    cpu_offload = cpu_offload is not None
+    
     # To broadcast, it needs to be instantiated in the GPU.
+    # 必须在 GPU 上进行 broadcast
     if dist.get_rank() == 0:
         model = model.to(device=get_device_id(), non_blocking=True)
     else:
         model = model.to_empty(device=get_device_id())
 
-    cpu_offload = cpu_offload is not None
-    options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
+    options = StateDictOptions(full_state_dict=True, cpu_offload=False, broadcast_from_rank0=True)
     set_model_state_dict(model, full_state, options=options)
 
     # rotary_emb is not in state_dict, so we need to broadcast it manually
     for name, buf in model.named_buffers():
         dist.broadcast(buf, src=0)
-
-    if cpu_offload:
-        model.to("cpu", non_blocking=True)
-        for buf in model.buffers():
-            buf.data = buf.data.to(get_device_id())
 
 
 @contextmanager
@@ -517,6 +524,8 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    elif isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
@@ -525,9 +534,34 @@ def apply_fsdp2(model, fsdp_kwargs, config):
         if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
             isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
         ):
-            modules.append(module)
+            modules.append((name, module))
+    
+    embed_tokens = getattr(model, 'embed_tokens', None)
+    norm = getattr(model, 'norm', None)
+    
+    if embed_tokens is not None:
+        embed_name = None
+        for name, module in model.named_modules():
+            if module is embed_tokens:
+                embed_name = name
+                break
+        if embed_name:
+            found = any(n == embed_name for n, m in modules)
+            if not found:
+                modules.append((embed_name, embed_tokens))
+    
+    if norm is not None:
+        norm_name = None
+        for name, module in model.named_modules():
+            if module is norm:
+                norm_name = name
+                break
+        if norm_name:
+            found = any(n == norm_name for n, m in modules)
+            if not found:
+                modules.append((norm_name, norm))
 
-    for idx, module in enumerate(modules):
+    for idx, (name, module) in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
         #     print(f"wrap module {module.__class__.__name__}")
         with maybe_patch_fsdp_module(module):

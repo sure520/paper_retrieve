@@ -293,8 +293,8 @@ class FSDPEngine(BaseEngine):
                 "r": self.model_config.lora_rank,
                 "lora_alpha": self.model_config.lora_alpha,
                 "target_modules": convert_to_regular_types(self.model_config.target_modules),
-                "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
-                "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
+                # "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
+                # "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
                 "bias": "none",
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
@@ -369,7 +369,7 @@ class FSDPEngine(BaseEngine):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
-
+            
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
                 "mp_policy": mp_policy,
@@ -379,6 +379,23 @@ class FSDPEngine(BaseEngine):
             full_state = module.state_dict()
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            
+            if offload_policy is not None:
+                module.to_empty(device="cpu")
+                for name, param in list(module.named_parameters()):
+                    if param.device.type != "cpu":
+                        param.data = param.data.to("cpu", non_blocking=True)
+                
+                params_on_gpu = []
+                for name, param in list(module.named_parameters()):
+                    if param.device.type != "cpu":
+                        params_on_gpu.append((name, str(param.device)))
+                
+                if params_on_gpu:
+                    raise RuntimeError(
+                        f"Failed to move all parameters to CPU for offload. "
+                        f"Parameters still on GPU: {params_on_gpu[:5]}..."
+                    )
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 
@@ -561,6 +578,28 @@ class FSDPEngine(BaseEngine):
         else:
             return torch.distributed.group.WORLD
 
+    def _ensure_params_on_cpu(self):
+        if not hasattr(self, '_params_on_cpu_checked') or not self._params_on_cpu_checked:
+            try:
+                from torch.distributed.fsdp._fully_shard._fsdp_state import _FSDPState
+                from torch.distributed._composable.fsdp import _get_module_fsdp_state
+                
+                for module in self.module.modules():
+                    if hasattr(module, '_fsdp_state') and module._fsdp_state is not None:
+                        state = module._fsdp_state
+                        if hasattr(state, '_fsdp_param_group') and state._fsdp_param_group is not None:
+                            param_group = state._fsdp_param_group
+                            if hasattr(param_group, '_params') and param_group._params:
+                                for param in param_group._params:
+                                    if hasattr(param, '_local_shard') and param._local_shard is not None:
+                                        param._local_shard.data = param._local_shard.data.to("cpu", non_blocking=True)
+                                    elif hasattr(param, 'data') and param.data.device.type != "cpu":
+                                        param.data = param.data.to("cpu", non_blocking=True)
+            except Exception:
+                pass
+            
+            self._params_on_cpu_checked = True
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
@@ -572,6 +611,9 @@ class FSDPEngine(BaseEngine):
         )
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
+
+        if self.engine_config.offload_policy and not forward_only:
+            self._ensure_params_on_cpu()
 
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True

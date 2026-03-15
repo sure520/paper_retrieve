@@ -37,18 +37,18 @@ NUM_EPOCHS=3
 WARMUP_RATIO=0.05
 LR_SCHEDULER_TYPE="cosine"
 
-MAX_LENGTH=66560           # 最大序列长度（论文输入 + JSON 输出）
+MAX_LENGTH=28106           # 最大序列长度（论文输入 + JSON 输出）
 
-# LoRA 配置（必须启用，防止 3090 OOM）
+# LoRA 配置（启用 LoRA 以减少显存占用）
 USE_LORA=true
-LORA_RANK=32                # LoRA 秩
-LORA_ALPHA=64               # LoRA alpha (通常是 rank 的 2 倍)
+LORA_RANK=8                 # LoRA 秩（降低以减少显存）
+LORA_ALPHA=16               # LoRA alpha (通常是 rank 的 2 倍)
 
-# 显存优化配置（关键：解决 66560 长度 OOM 问题）
+# 显存优化配置（关键：解决 OOM 问题）
 MODEL_DTYPE="bfloat16"      # 使用 bf16 混合精度训练
-OFFLOAD_POLICY=true
-PARAM_OFFLOAD="false"       # 参数卸载（有 Bug，与 LoRA 不兼容，设为 false）
-OPTIMIZER_OFFLOAD="false"   # 优化器卸载（有 Bug，与 LoRA 不兼容，设为 false）
+OFFLOAD_POLICY=false        # 禁用 offload_policy（与 LoRA 不兼容）
+PARAM_OFFLOAD=false         # 禁用参数卸载（与 LoRA 不兼容）
+OPTIMIZER_OFFLOAD=false     # 禁用优化器卸载（与 LoRA 不兼容）
 
 # ==================== 启动 SFT 训练 ====================
 echo "=========================================="
@@ -109,9 +109,12 @@ torchrun --standalone --nnodes=1 --nproc_per_node=${NPROC_PER_NODE} \
     trainer.test_freq=50 \
     $(if [ "$USE_LORA" = true ]; then echo "model.target_modules=[\"q_proj\",\"k_proj\",\"v_proj\",\"o_proj\",\"gate_proj\",\"up_proj\",\"down_proj\"] model.lora_rank=${LORA_RANK} model.lora_alpha=${LORA_ALPHA}"; fi) \
     engine=fsdp \
+    engine.strategy=fsdp \
     engine.ulysses_sequence_parallel_size=${SP_SIZE} \
     engine.model_dtype=${MODEL_DTYPE} \
     engine.offload_policy=${OFFLOAD_POLICY} \
+    engine.param_offload=${PARAM_OFFLOAD} \
+    engine.optimizer_offload=${OPTIMIZER_OFFLOAD} \
     2>&1 | tee ${TRAIN_DIR}/train_log.txt
 
 # ==================== 训练完成 ====================
