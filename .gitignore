@@ -205,3 +205,4 @@ __pycache__/
 *.backup
 *.old
 .qwen/
+Qwen/
