@@ -20,7 +20,7 @@ torchdata
 transformers>=4.30.0
 peft>=0.5.0
 deepspeed>=0.10.0
-tensordict>=0.8.0,<=0.10.0,!=0.9.0  # 保留原版本限制
+tensordict>=0.8.0,!=0.9.0,<=0.11.0  # 保留原版本限制
 safetensors
 sentencepiece
 
